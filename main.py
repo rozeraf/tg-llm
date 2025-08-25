@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-
+"""
+Simple Telegram bot that proxies messages to an OpenRouter / generic LLM API
+"""
 
 import asyncio
 import json
 import logging
 import os
-import sqlite3
 import time
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
+import psycopg2
 import requests
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -25,7 +27,6 @@ from telegram.ext import (
 
 # Files
 CONFIG_FILE = Path("config.json")
-DB_FILE = Path("history.db")
 ENV_FILE = Path(".env")
 
 # Conversation states for first-time setup
@@ -49,6 +50,7 @@ DEFAULT_CONFIG = {
     "endpoint": "",
     "model": "",
     "system_prompt": "You are a helpful assistant.",
+    "context_messages_count": 10,
 }
 
 
@@ -58,7 +60,12 @@ def read_config() -> dict:
         write_config(DEFAULT_CONFIG)
         return DEFAULT_CONFIG.copy()
     try:
-        return json.loads(CONFIG_FILE.read_text())
+        # ensure all keys are present
+        cfg = json.loads(CONFIG_FILE.read_text())
+        for key, value in DEFAULT_CONFIG.items():
+            if key not in cfg:
+                cfg[key] = value
+        return cfg
     except Exception:
         return DEFAULT_CONFIG.copy()
 
@@ -67,47 +74,82 @@ def write_config(cfg: dict):
     CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
-# --- Simple sqlite history ---
-def init_db() -> None:
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute(
-        """
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER,
-            role TEXT,
-            content TEXT,
-            created_at INTEGER
-        )
-        """
+# --- DB helpers ---
+def get_db_conn():
+    return psycopg2.connect(
+        host=os.getenv("POSTGRES_HOST"),
+        port=os.getenv("POSTGRES_PORT"),
+        dbname=os.getenv("POSTGRES_DB"),
+        user=os.getenv("POSTGRES_USER"),
+        password=os.getenv("POSTGRES_PASSWORD"),
     )
-    conn.commit()
-    conn.close()
+
+
+def init_db() -> None:
+    retries = 5
+    while retries > 0:
+        try:
+            conn = get_db_conn()
+            c = conn.cursor()
+            c.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS messages (
+                    id SERIAL PRIMARY KEY,
+                    chat_id BIGINT,
+                    role TEXT,
+                    content TEXT,
+                    created_at BIGINT
+                )
+                '''
+            )
+            conn.commit()
+            c.close()
+            conn.close()
+            logger.info("Database initialized.")
+            return
+        except psycopg2.OperationalError as e:
+            logger.warning("DB not ready, retrying... (%s)", e)
+            retries -= 1
+            time.sleep(5)
+    raise RuntimeError("Could not connect to database.")
 
 
 def add_message(chat_id: int, role: str, content: str) -> None:
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_conn()
     c = conn.cursor()
     c.execute(
-        "INSERT INTO messages (chat_id, role, content, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO messages (chat_id, role, content, created_at) VALUES (%s, %s, %s, %s)",
         (chat_id, role, content, int(time.time())),
     )
     conn.commit()
+    c.close()
     conn.close()
 
 
 def get_recent_messages(chat_id: int, limit: int = 10) -> List[Tuple[str, str]]:
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_conn()
     c = conn.cursor()
     c.execute(
-        "SELECT role, content FROM messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT ?",
+        "SELECT role, content FROM messages WHERE chat_id = %s ORDER BY created_at DESC LIMIT %s",
         (chat_id, limit),
     )
     rows = c.fetchall()
+    c.close()
     conn.close()
     rows.reverse()
     return rows
+
+def get_first_message(chat_id: int) -> Optional[Tuple[str, str]]:
+    conn = get_db_conn()
+    c = conn.cursor()
+    c.execute(
+        "SELECT role, content FROM messages WHERE chat_id = %s ORDER BY created_at ASC LIMIT 1",
+        (chat_id,),
+    )
+    row = c.fetchone()
+    c.close()
+    conn.close()
+    return row
 
 
 # --- Setup conversation (/start) ---
@@ -128,9 +170,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_endpoint(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["endpoint"] = update.message.text.strip()
-    await update.message.reply_text(
-        "Укажите название модели (пример: deepseek/deepseek-r1-0528:free):"
-    )
+    await update.message.reply_text("Укажите название модели (пример: deepseek/deepseek-r1-0528:free):")
     return SET_MODEL
 
 
@@ -154,9 +194,7 @@ async def set_apikey(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cfg["model"] = context.user_data.get("model", cfg.get("model"))
     write_config(cfg)
 
-    await update.message.reply_text(
-        "Конфигурация сохранена. Отправьте сообщение, чтобы начать чат с моделью. Используйте /settings для просмотра/изменения настроек."
-    )
+    await update.message.reply_text("Конфигурация сохранена. Отправьте сообщение, чтобы начать чат с моделью. Используйте /settings для просмотра/изменения настроек.")
     return ConversationHandler.END
 
 
@@ -173,7 +211,8 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         f"Текущая конфигурация:\n"
         f"Endpoint: `{cfg.get('endpoint')}`\n"
         f"Model: `{cfg.get('model')}`\n"
-        f"System prompt: `{cfg.get('system_prompt')}`\n\n"
+        f"System prompt: `{cfg.get('system_prompt')}`\n"
+        f"Context messages: `{cfg.get('context_messages_count')}`\n\n"
         "Какую настройку вы хотите изменить?"
     )
     keyboard = [
@@ -181,12 +220,11 @@ async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         [InlineKeyboardButton("System prompt", callback_data="settings_system_prompt")],
         [InlineKeyboardButton("Endpoint", callback_data="settings_endpoint")],
         [InlineKeyboardButton("Model", callback_data="settings_model")],
+        [InlineKeyboardButton("Context messages", callback_data="settings_context_messages_count")],
         [InlineKeyboardButton("Отмена", callback_data="settings_cancel")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        text, reply_markup=reply_markup, parse_mode="MarkdownV2"
-    )
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="MarkdownV2")
     return SELECTING_SETTING
 
 
@@ -203,7 +241,7 @@ async def settings_callback_handler(
         return ConversationHandler.END
 
     context.user_data["setting_to_change"] = choice
-
+    
     if choice == "settings_apikey":
         prompt = "Введите новый API Key:"
     elif choice == "settings_system_prompt":
@@ -212,6 +250,8 @@ async def settings_callback_handler(
         prompt = "Введите новый URL endpoint'а:"
     elif choice == "settings_model":
         prompt = "Введите новое название модели:"
+    elif choice == "settings_context_messages_count":
+        prompt = "Введите новое количество сообщений в контексте:"
     else:
         await query.edit_message_text("Неизвестная опция.")
         return ConversationHandler.END
@@ -247,6 +287,13 @@ async def set_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         cfg["model"] = new_value
         write_config(cfg)
         await update.message.reply_text("Модель обновлена.")
+    elif setting_to_change == "settings_context_messages_count":
+        try:
+            cfg["context_messages_count"] = int(new_value)
+            write_config(cfg)
+            await update.message.reply_text("Количество сообщений в контексте обновлено.")
+        except ValueError:
+            await update.message.reply_text("Ошибка: введите число.")
 
     context.user_data.clear()
     return ConversationHandler.END
@@ -270,24 +317,16 @@ def extract_text_from_response(resp_json: dict) -> str:
                     for item in first["content"]:
                         if item.get("type") in ("output_text", "message"):
                             return item.get("text") or item.get("content") or str(item)
-                    return "\n".join(
-                        [c.get("text", str(c)) for c in first.get("content", [])]
-                    )
+                    return "\n".join([c.get("text", str(c)) for c in first.get("content", [])])
     except Exception:
         pass
 
     try:
-        if (
-            "choices" in resp_json
-            and isinstance(resp_json["choices"], list)
-            and len(resp_json["choices"]) > 0
-        ):
+        if "choices" in resp_json and isinstance(resp_json["choices"], list) and len(resp_json["choices"]) > 0:
             ch = resp_json["choices"][0]
             if "message" in ch and "content" in ch["message"]:
                 if isinstance(ch["message"]["content"], dict):
-                    return ch["message"]["content"].get(
-                        "text", json.dumps(ch["message"]["content"])
-                    )
+                    return ch["message"]["content"].get("text", json.dumps(ch["message"]["content"]))
                 return ch["message"]["content"]
             if "text" in ch:
                 return ch["text"]
@@ -313,6 +352,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     model = cfg.get("model")
     system_prompt = cfg.get("system_prompt") or DEFAULT_CONFIG["system_prompt"]
     api_key = os.getenv("API_KEY")
+    context_messages_count = cfg.get("context_messages_count", 10)
 
     if not endpoint or not model or not api_key:
         await update.message.reply_text(
@@ -320,14 +360,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    history = get_recent_messages(chat_id, limit=10)
     messages = []
     if system_prompt:
         messages.append({"role": "system", "content": system_prompt})
+
+    # Add first message for long-term context
+    first_message = get_first_message(chat_id)
+    
+    # Get recent messages
+    history = get_recent_messages(chat_id, limit=context_messages_count)
+
+    if first_message and first_message not in history:
+        messages.append({"role": first_message[0], "content": first_message[1]})
+
     for role, content in history:
         messages.append({"role": role, "content": content})
-    if not history or history[-1][1] != user_text:
-        messages.append({"role": "user", "content": user_text})
+
+    # Ensure the current message is included if history was full
+    if not any(m["role"] == "user" and m["content"] == user_text for m in messages):
+         messages.append({"role": "user", "content": user_text})
+
 
     payload = {"model": model, "messages": messages}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -370,11 +422,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # detect if response is HTML (indicates wrong endpoint or invalid key)
     text_start = (text or "")[:200].lstrip()
     content_type = (resp_headers or {}).get("Content-Type", "")
-    if (
-        text_start.startswith("<!DOCTYPE")
-        or text_start.startswith("<html")
-        or "text/html" in content_type
-    ):
+    if text_start.startswith("<!DOCTYPE") or text_start.startswith("<html") or "text/html" in content_type:
         await update.message.reply_text(
             "Сервер вернул HTML-страницу вместо JSON. Проверьте endpoint и API-ключ."
         )
@@ -410,9 +458,7 @@ def main():
     setup_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            SET_ENDPOINT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, set_endpoint)
-            ],
+            SET_ENDPOINT: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_endpoint)],
             SET_MODEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_model)],
             SET_APIKEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_apikey)],
         },
