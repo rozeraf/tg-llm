@@ -1033,8 +1033,8 @@ def main():
     app.add_handler(CommandHandler("context", context_command))
     app.add_handler(CallbackQueryHandler(context_callback_handler, pattern="^clear_context"))
     
-    # Generic message handler for text, photos, and documents
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL, main_message_handler))
+    # Generic message handler for text, photos, and documents (with lower priority)
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.Document.ALL, main_message_handler), group=1)
 
     logger.info("🚀 Multi-user bot started successfully!")
     return app
