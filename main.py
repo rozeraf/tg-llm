@@ -15,6 +15,7 @@ import requests
 from dotenv import load_dotenv
 from cryptography.fernet import Fernet, InvalidToken
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, Document, PhotoSize
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -481,100 +482,410 @@ async def set_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data.clear()
     return ConversationHandler.END
 
+# --- Main Logic ---
+
+# --- Helper to extract assistant text ---
+def extract_text_from_response(resp_json: dict) -> str:
+    # This function remains the same
+    try:
+        if "output" in resp_json:
+            out = resp_json["output"]
+            if isinstance(out, list) and len(out) > 0:
+                first = out[0]
+                if "content" in first and isinstance(first["content"], list):
+                    for item in first["content"]:
+                        if item.get("type") in ("output_text", "message"):
+                            return item.get("text") or item.get("content") or str(item)
+                    return "\n".join(
+                        [c.get("text", str(c)) for c in first.get("content", [])]
+                    )
+    except Exception:
+        pass
+
+    try:
+        if (
+            "choices" in resp_json
+            and isinstance(resp_json["choices"], list)
+            and len(resp_json["choices"]) > 0
+        ):
+            ch = resp_json["choices"][0]
+            if "message" in ch and "content" in ch["message"]:
+                if isinstance(ch["message"]["content"], dict):
+                    return ch["message"]["content"].get(
+                        "text", json.dumps(ch["message"]["content"])
+                    )
+                return ch["message"]["content"]
+            if "text" in ch:
+                return ch["text"]
+    except Exception:
+        pass
+
+    return json.dumps(resp_json)[:2000]
+
+# --- Web search function ---
+def search_web(query: str, num_results: int = 5) -> List[Dict[str, str]]:
+    """Search web using DuckDuckGo API"""
+    try:
+        url = "https://api.duckduckgo.com/"
+        params = {
+            'q': query,
+            'format': 'json',
+            'no_redirect': '1',
+            'no_html': '1',
+            'skip_disambig': '1'
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            
+            if data.get('AbstractText'):
+                results.append({
+                    'title': data.get('AbstractText', '')[:100],
+                    'snippet': data.get('AbstractText', ''),
+                    'url': data.get('AbstractURL', '')
+                })
+            
+            for topic in data.get('RelatedTopics', [])[:num_results]:
+                if isinstance(topic, dict) and 'Text' in topic:
+                    results.append({
+                        'title': topic.get('Text', '')[:50],
+                        'snippet': topic.get('Text', ''),
+                        'url': topic.get('FirstURL', '')
+                    })
+            
+            return results[:num_results]
+    except Exception as e:
+        logger.error(f"Web search error: {e}")
+    
+    return []
+
+def should_use_thinking_mode(user_message: str, api_key: str, router_endpoint: str, router_model: str) -> bool:
+    """Use router model to determine if thinking mode is needed"""
+    try:
+        prompt = f'''Analyze this user message and determine if it requires deep reasoning, complex problem-solving, or step-by-step thinking.
+
+User message: "{user_message}"
+
+Respond with ONLY "YES" if thinking mode is needed for:
+- Complex math problems
+- Multi-step reasoning
+- Coding challenges
+- Analysis requiring careful consideration
+- Problems that benefit from showing work
+
+Respond with ONLY "NO" for:
+- Simple questions
+- Casual conversation
+- Basic information requests
+- Straightforward tasks
+
+Response:'''
+
+        payload = {
+            "model": router_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 10
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(router_endpoint, headers=headers, json=payload, timeout=15)
+        if response.status_code == 200:
+            result = response.json()
+            text = extract_text_from_response(result).strip().upper()
+            return "YES" in text
+    except Exception as e:
+        logger.error(f"Router model error: {e}")
+    
+    return False
+
+def should_search_web(user_message: str) -> bool:
+    """Simple heuristic to determine if web search is needed"""
+    search_indicators = [
+        "latest", "recent", "current", "today", "news", "weather",
+        "what's happening", "update", "2024", "2025", "now",
+        "search", "find", "look up"
+    ]
+    
+    message_lower = user_message.lower()
+    return any(indicator in message_lower for indicator in search_indicators)
+
+
+# --- File processing functions ---
+async def process_document(file_path: Path, file_type: str) -> str:
+    """Process uploaded documents and extract text content"""
+    try:
+        if file_type.lower() == 'pdf':
+            with open(file_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                text = ""
+                for page in pdf_reader.pages:
+                    text += page.extract_text() + "\n"
+                return text.strip()
+        
+        elif file_type.lower() == 'txt':
+            return file_path.read_text(encoding='utf-8')
+        
+        elif file_type.lower() in ['jpg', 'jpeg', 'png', 'webp']:
+            return f"[IMAGE: {file_path.name}]"
+    
+    except Exception as e:
+        logger.error(f"Error processing file {file_path}: {e}")
+        return f"[Error processing file: {e}]"
+    
+    return "[Unsupported file type]"
+
+# --- Main Logic ---
+
+# --- Helper to extract assistant text ---
+def extract_text_from_response(resp_json: dict) -> str:
+    # This function remains the same
+    try:
+        if "output" in resp_json:
+            out = resp_json["output"]
+            if isinstance(out, list) and len(out) > 0:
+                first = out[0]
+                if "content" in first and isinstance(first["content"], list):
+                    for item in first["content"]:
+                        if item.get("type") in ("output_text", "message"):
+                            return item.get("text") or item.get("content") or str(item)
+                    return "\n".join(
+                        [c.get("text", str(c)) for c in first.get("content", [])]
+                    )
+    except Exception:
+        pass
+
+    try:
+        if (
+            "choices" in resp_json
+            and isinstance(resp_json["choices"], list)
+            and len(resp_json["choices"]) > 0
+        ):
+            ch = resp_json["choices"][0]
+            if "message" in ch and "content" in ch["message"]:
+                if isinstance(ch["message"]["content"], dict):
+                    return ch["message"]["content"].get(
+                        "text", json.dumps(ch["message"]["content"])
+                    )
+                return ch["message"]["content"]
+            if "text" in ch:
+                return ch["text"]
+    except Exception:
+        pass
+
+    return json.dumps(resp_json)[:2000]
+
+# --- Web search function ---
+def search_web(query: str, num_results: int = 5) -> List[Dict[str, str]]:
+    """Search web using DuckDuckGo API"""
+    try:
+        url = "https://api.duckduckgo.com/"
+        params = {
+            'q': query,
+            'format': 'json',
+            'no_redirect': '1',
+            'no_html': '1',
+            'skip_disambig': '1'
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            results = []
+            
+            if data.get('AbstractText'):
+                results.append({
+                    'title': data.get('AbstractText', '')[:100],
+                    'snippet': data.get('AbstractText', ''),
+                    'url': data.get('AbstractURL', '')
+                })
+            
+            for topic in data.get('RelatedTopics', [])[:num_results]:
+                if isinstance(topic, dict) and 'Text' in topic:
+                    results.append({
+                        'title': topic.get('Text', '')[:50],
+                        'snippet': topic.get('Text', ''),
+                        'url': topic.get('FirstURL', '')
+                    })
+            
+            return results[:num_results]
+    except Exception as e:
+        logger.error(f"Web search error: {e}")
+    
+    return []
+
+def should_use_thinking_mode(user_message: str, api_key: str, router_endpoint: str, router_model: str) -> bool:
+    """Use router model to determine if thinking mode is needed"""
+    try:
+        prompt = f'''Analyze this user message and determine if it requires deep reasoning, complex problem-solving, or step-by-step thinking.
+
+User message: "{user_message}"
+
+Respond with ONLY "YES" if thinking mode is needed for:
+- Complex math problems
+- Multi-step reasoning
+- Coding challenges
+- Analysis requiring careful consideration
+- Problems that benefit from showing work
+
+Respond with ONLY "NO" for:
+- Simple questions
+- Casual conversation
+- Basic information requests
+- Straightforward tasks
+
+Response:'''
+
+        payload = {
+            "model": router_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 10
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(router_endpoint, headers=headers, json=payload, timeout=15)
+        if response.status_code == 200:
+            result = response.json()
+            text = extract_text_from_response(result).strip().upper()
+            return "YES" in text
+    except Exception as e:
+        logger.error(f"Router model error: {e}")
+    
+    return False
+
+def should_search_web(user_message: str) -> bool:
+    """Simple heuristic to determine if web search is needed"""
+    search_indicators = [
+        "latest", "recent", "current", "today", "news", "weather",
+        "what's happening", "update", "2024", "2025", "now",
+        "search", "find", "look up"
+    ]
+    
+    message_lower = user_message.lower()
+    return any(indicator in message_lower for indicator in search_indicators)
+
+
+# --- File processing functions ---
+async def process_document(file_path: Path, file_type: str) -> str:
+    """Process uploaded documents and extract text content"""
+    try:
+        if file_type.lower() == 'pdf':
+            with open(file_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                text = ""
+                for page in pdf_reader.pages:
+                    text += page.extract_text() + "\n"
+                return text.strip()
+        
+        elif file_type.lower() == 'txt':
+            return file_path.read_text(encoding='utf-8')
+        
+        elif file_type.lower() in ['jpg', 'jpeg', 'png', 'webp']:
+            return f"[IMAGE: {file_path.name}]"
+    
+    except Exception as e:
+        logger.error(f"Error processing file {file_path}: {e}")
+        return f"[Error processing file: {e}]"
+    
+    return "[Unsupported file type]"
+
 
 # --- Message Handlers (Multi-User Aware) ---
 
 async def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Main handler for text, documents, and photos."""
+    """Main handler for text, documents, and photos, with robust error handling."""
     chat_id = update.effective_chat.id
-    user_settings = get_user_settings(chat_id)
-
-    if not user_settings or not user_settings.get("api_key"):
-        await update.message.reply_text("Пожалуйста, сначала настройте свой аккаунт с помощью /start.")
-        return
-
-    user_text = update.message.text
-    if user_text:
-        add_message(chat_id, "user", user_text)
-    
-    # File handling logic
-    if update.message.document:
-        await handle_document(update, context, user_settings)
-        # If there is no caption, we don't want to trigger the LLM
-        if not user_text:
-            return
-    if update.message.photo:
-        await handle_photo(update, context, user_settings)
-        if not user_text:
-            return
-
-    if not user_text: # Should not happen if checks above are correct
-        return
-
-    # --- Main LLM call logic ---
-    status_message = await update.message.reply_text("🤔 Анализирую запрос...")
-    
-    # Use user-specific settings
-    api_key = user_settings["api_key"]
-    endpoint = user_settings["endpoint"]
-    model = user_settings["model"]
-    reasoning_model = user_settings["reasoning_model"]
-    router_model = user_settings["router_model"]
-    system_prompt = user_settings["system_prompt"]
-    context_messages_count = user_settings["context_messages_count"]
-    auto_thinking = user_settings["auto_thinking"]
-    search_enabled = user_settings["search_enabled"]
-
-    # Web search
-    search_results = []
-    if search_enabled and should_search_web(user_text):
-        await status_message.edit_text("🔍 Ищу информацию в интернете...")
-        search_results = search_web(user_text)
-
-    # Thinking mode
-    use_thinking = False
-    if auto_thinking and reasoning_model:
-        use_thinking = await asyncio.to_thread(should_use_thinking_mode, user_text, api_key, endpoint, router_model)
-    
-    mode_text = "🧠 Thinking режим" if use_thinking else "💬 Обычный режим"
-    search_text = " + 🔍 поиск" if search_results else ""
-    await status_message.edit_text(f"{mode_text}{search_text} - обрабатываю...")
-
-    # Prepare context
-    messages = []
-    enhanced_system_prompt = system_prompt
-    
-    file_contexts = get_file_contexts(chat_id)
-    if file_contexts:
-        enhanced_system_prompt += "\n\nДоступный контекст файлов:\n"
-        for fc in file_contexts:
-            enhanced_system_prompt += f"\n=== {fc['filename']} ===\n{fc['content'][:1000]}...\n"
-    
-    if search_results:
-        enhanced_system_prompt += "\n\nРезультаты поиска в интернете:\n"
-        for i, result in enumerate(search_results, 1):
-            enhanced_system_prompt += f"{i}. {result['title']}\n{result['snippet'][:200]}...\n"
-    
-    messages.append({"role": "system", "content": enhanced_system_prompt})
-
-    first_message = get_first_message(chat_id)
-    history = get_recent_messages(chat_id, limit=context_messages_count)
-
-    if first_message and first_message not in history:
-        messages.append({"role": first_message[0], "content": first_message[1]})
-
-    for role, content in history:
-        messages.append({"role": role, "content": content})
-
-    if not any(m["role"] == "user" and m["content"] == user_text for m in messages):
-        messages.append({"role": "user", "content": user_text})
-
-    # API Call
-    selected_model = reasoning_model if use_thinking else model
-    payload = {"model": selected_model, "messages": messages}
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-
     try:
+        user_settings = get_user_settings(chat_id)
+
+        if not user_settings or not user_settings.get("api_key"):
+            await update.message.reply_text("Пожалуйста, сначала настройте свой аккаунт с помощью /start.")
+            return
+
+        user_text = update.message.text
+        if user_text:
+            add_message(chat_id, "user", user_text)
+        
+        # File handling logic
+        if update.message.document:
+            await handle_document(update, context, user_settings)
+            if not user_text:
+                return
+        if update.message.photo:
+            await handle_photo(update, context, user_settings)
+            if not user_text:
+                return
+
+        if not user_text:
+            return
+
+        # --- Main LLM call logic ---
+        status_message = await update.message.reply_text("🤔 Анализирую запрос...")
+        
+        api_key = user_settings["api_key"]
+        endpoint = user_settings["endpoint"]
+        model = user_settings["model"]
+        reasoning_model = user_settings["reasoning_model"]
+        router_model = user_settings["router_model"]
+        system_prompt = user_settings["system_prompt"]
+        context_messages_count = user_settings["context_messages_count"]
+        auto_thinking = user_settings["auto_thinking"]
+        search_enabled = user_settings["search_enabled"]
+
+        search_results = []
+        if search_enabled and should_search_web(user_text):
+            await status_message.edit_text("🔍 Ищу информацию в интернете...")
+            search_results = search_web(user_text)
+
+        use_thinking = False
+        if auto_thinking and reasoning_model:
+            use_thinking = await asyncio.to_thread(should_use_thinking_mode, user_text, api_key, endpoint, router_model)
+        
+        mode_text = "🧠 Thinking режим" if use_thinking else "💬 Обычный режим"
+        search_text = " + 🔍 поиск" if search_results else ""
+        await status_message.edit_text(f"{mode_text}{search_text} - обрабатываю...")
+
+        messages = []
+        enhanced_system_prompt = system_prompt
+        
+        file_contexts = get_file_contexts(chat_id)
+        if file_contexts:
+            enhanced_system_prompt += "\n\nДоступный контекст файлов:\n"
+            for fc in file_contexts:
+                enhanced_system_prompt += f"\n=== {fc['filename']} ===\n{fc['content'][:1000]}...\n"
+        
+        if search_results:
+            enhanced_system_prompt += "\n\nРезультаты поиска в интернете:\n"
+            for i, result in enumerate(search_results, 1):
+                enhanced_system_prompt += f"{i}. {result['title']}\n{result['snippet'][:200]}...\n"
+        
+        messages.append({"role": "system", "content": enhanced_system_prompt})
+
+        first_message = get_first_message(chat_id)
+        history = get_recent_messages(chat_id, limit=context_messages_count)
+
+        if first_message and first_message not in history:
+            messages.append({"role": first_message[0], "content": first_message[1]})
+
+        for role, content in history:
+            messages.append({"role": role, "content": content})
+
+        if not any(m["role"] == "user" and m["content"] == user_text for m in messages):
+            messages.append({"role": "user", "content": user_text})
+
+        selected_model = reasoning_model if use_thinking else model
+        payload = {"model": selected_model, "messages": messages}
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
         timeout = 180 if use_thinking else 60
         response = await asyncio.to_thread(requests.post, endpoint, headers=headers, json=payload, timeout=timeout)
         response.raise_for_status()
@@ -586,12 +897,18 @@ async def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         await status_message.delete()
         await update.message.reply_text(assistant_text)
 
+    except (NetworkError, TimedOut) as e:
+        logger.error(f"Telegram API network error for chat_id {chat_id}: {e}")
+        try:
+            await context.bot.send_message(chat_id, f"❌ Ошибка сети при общении с Telegram: {e}. Пожалуйста, попробуйте еще раз позже.")
+        except Exception as inner_e:
+            logger.error(f"Failed to even send a network error message to chat_id {chat_id}: {inner_e}")
     except requests.exceptions.RequestException as e:
-        logger.error(f"API request error for chat_id {chat_id}: {e}")
-        await status_message.edit_text(f"❌ Ошибка сети при обращении к API: {e}")
+        logger.error(f"LLM API request error for chat_id {chat_id}: {e}")
+        await status_message.edit_text(f"❌ Ошибка сети при обращении к LLM API: {e}")
     except Exception as e:
-        logger.error(f"Error during message handling for chat_id {chat_id}: {e}")
-        await status_message.edit_text(f"❌ Произошла внутренняя ошибка: {e}")
+        logger.error(f"An unexpected error occurred for chat_id {chat_id}: {e}", exc_info=True)
+        await context.bot.send_message(chat_id, f"❌ Произошла непредвиденная ошибка. Администратор был уведомлен.")
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_settings: Dict[str, Any]):
