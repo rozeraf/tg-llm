@@ -15,3 +15,6 @@ pymupdf>=1.23.0
 
 opencv-python>=4.8.0
 pytesseract>=0.3.10
+
+# For API key encryption
+cryptography>=42.0.0

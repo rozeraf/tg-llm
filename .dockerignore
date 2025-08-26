@@ -1,0 +1,22 @@
+# Git and virtual environment
+.git
+.venv
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Secrets and local config
+.env
+config.json
+
+# Obsolete database file
+history.db
+
+# Uploads directory (created at runtime)
+uploads/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
