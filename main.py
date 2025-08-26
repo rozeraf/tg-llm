@@ -39,21 +39,60 @@ logger = logging.getLogger(__name__)
 # Load environment
 load_dotenv()
 
-# Encryption key
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY")
-if not ENCRYPTION_KEY:
-    raise RuntimeError(
-        "ENCRYPTION_KEY is not set in the environment. "
-        "Please generate one using the command in .env.example."
-    )
+def setup_encryption() -> Fernet:
+    """
+    Loads or generates and saves the Fernet encryption key.
+    Returns an initialized Fernet instance.
+    """
+    env_path = Path('.env')
+    load_dotenv(dotenv_path=env_path)
+    encryption_key = os.getenv("ENCRYPTION_KEY")
 
-try:
-    fernet = Fernet(ENCRYPTION_KEY.encode())
-except ValueError:
-    raise RuntimeError(
-        "Invalid ENCRYPTION_KEY. The key must be 32 url-safe base64-encoded bytes. "
-        "Please generate a new, valid key using the command in .env.example."
-    )
+    def is_valid_key(k):
+        if not k:
+            return False
+        try:
+            Fernet(k.encode())
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    if is_valid_key(encryption_key):
+        logger.info("ENCRYPTION_KEY loaded successfully.")
+        return Fernet(encryption_key.encode())
+
+    # If key is missing or invalid, generate a new one
+    if encryption_key:
+        logger.warning("Existing ENCRYPTION_KEY is invalid. Generating a new one.")
+    else:
+        logger.info("ENCRYPTION_KEY not found. Generating a new one.")
+    
+    new_key = Fernet.generate_key().decode()
+
+    # Update .env file
+    if env_path.exists():
+        lines = env_path.read_text().splitlines()
+        key_found = False
+        for i, line in enumerate(lines):
+            if line.strip().startswith("ENCRYPTION_KEY="):
+                lines[i] = f"ENCRYPTION_KEY={new_key}"
+                key_found = True
+                break
+        if not key_found:
+            lines.append(f"ENCRYPTION_KEY={new_key}")
+        env_path.write_text("\n".join(lines) + "\n")
+    else:
+        env_path.write_text(f"ENCRYPTION_KEY={new_key}\n")
+
+    logger.info("A new ENCRYPTION_KEY has been generated and saved to .env")
+    
+    # Update environment for the current process
+    os.environ['ENCRYPTION_KEY'] = new_key
+    
+    return Fernet(new_key.encode())
+
+# Encryption key
+fernet = setup_encryption()
 
 # Conversation states
 (
