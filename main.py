@@ -315,20 +315,20 @@ def clear_file_contexts(chat_id: int) -> None:
 
 
 # --- Setup conversation for new users ---
-def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handles the /start command."""
     chat_id = update.effective_chat.id
     user_settings = get_user_settings(chat_id)
 
     if user_settings and user_settings.get("api_key"):
-        update.message.reply_text(
+        await update.message.reply_text(
             "🤖 С возвращением! Я готов к работе.\n"
             "Используйте /settings для изменения настроек или /help для просмотра всех команд."
         )
         return ConversationHandler.END
 
     # New user
-    update.message.reply_text(
+    await update.message.reply_text(
         "👋 Добро пожаловать! Я — ваш персональный AI-ассистент.\n\n"
         "Для начала работы мне нужно узнать несколько деталей. "
         "Давайте настроим ваш аккаунт.\n\n"
@@ -337,19 +337,19 @@ def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data["settings"] = {}
     return ASK_ENDPOINT
 
-def ask_endpoint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def ask_endpoint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Saves endpoint and asks for model."""
     context.user_data["settings"]["endpoint"] = update.message.text.strip()
-    update.message.reply_text("✅ Отлично! Теперь укажите название основной модели (например, mistralai/mistral-7b-instruct:free).")
+    await update.message.reply_text("✅ Отлично! Теперь укажите название основной модели (например, mistralai/mistral-7b-instruct:free).")
     return ASK_MODEL
 
-def ask_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def ask_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Saves model and asks for API key."""
     context.user_data["settings"]["model"] = update.message.text.strip()
-    update.message.reply_text("🔑 Теперь пришлите ваш API-ключ. Он будет зашифрован для безопасности.")
+    await update.message.reply_text("🔑 Теперь пришлите ваш API-ключ. Он будет зашифрован для безопасности.")
     return ASK_APIKEY
 
-def ask_apikey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def ask_apikey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Saves API key and completes setup."""
     chat_id = update.effective_chat.id
     api_key = update.message.text.strip()
@@ -362,28 +362,28 @@ def ask_apikey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     # Create the user in the database
     create_or_update_user(chat_id, settings)
 
-    update.message.reply_text(
+    await update.message.reply_text(
         "🎉 Настройка завершена! Ваш аккаунт создан.\n\n"
         "Я готов к работе. Отправьте мне сообщение, файл или воспользуйтесь командой /help для получения дополнительной информации."
     )
     context.user_data.clear()
     return ConversationHandler.END
 
-def cancel_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def cancel_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancels the setup process."""
-    update.message.reply_text("Настройка отменена. Вы можете начать заново в любой момент командой /start.")
+    await update.message.reply_text("Настройка отменена. Вы можете начать заново в любой момент командой /start.")
     context.user_data.clear()
     return ConversationHandler.END
 
 
 # --- Settings conversation for existing users ---
-def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Starts the settings conversation for an existing user."""
     chat_id = update.effective_chat.id
     user_settings = get_user_settings(chat_id)
 
     if not user_settings:
-        update.message.reply_text("Сначала вам нужно зарегистрироваться. Пожалуйста, используйте команду /start.")
+        await update.message.reply_text("Сначала вам нужно зарегистрироваться. Пожалуйста, используйте команду /start.")
         return ConversationHandler.END
 
     text = (
@@ -421,17 +421,17 @@ def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    update.message.reply_text(text, reply_markup=reply_markup, parse_mode="MarkdownV2")
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="MarkdownV2")
     return SELECTING_SETTING
 
-def settings_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def settings_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle settings button clicks."""
     query = update.callback_query
-    query.answer()
+    await query.answer()
     choice = query.data
 
     if choice == "settings_cancel":
-        query.edit_message_text("❌ Изменение настроек отменено.")
+        await query.edit_message_text("❌ Изменение настроек отменено.")
         return ConversationHandler.END
 
     context.user_data["setting_to_change"] = choice.replace("settings_", "")
@@ -449,17 +449,17 @@ def settings_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     }
     
     prompt = prompts.get(context.user_data["setting_to_change"], "Введите новое значение:")
-    query.edit_message_text(text=prompt)
+    await query.edit_message_text(text=prompt)
     return UPDATING_SETTING
 
-def set_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def set_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Saves the new setting value for the user."""
     chat_id = update.effective_chat.id
     new_value = update.message.text.strip()
     setting_key = context.user_data.get("setting_to_change")
 
     if not setting_key:
-        update.message.reply_text("❌ Произошла ошибка. Попробуйте снова /settings.")
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте снова /settings.")
         return ConversationHandler.END
 
     # Type conversion and validation
@@ -469,188 +469,28 @@ def set_setting_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         try:
             value_to_save = int(new_value)
         except ValueError:
-            update.message.reply_text("❌ Ошибка: введите число.")
+            await update.message.reply_text("❌ Ошибка: введите число.")
             return UPDATING_SETTING # Ask again
     else:
         value_to_save = new_value
 
     # Update database
     create_or_update_user(chat_id, {setting_key: value_to_save})
-    update.message.reply_text(f"✅ Настройка '{setting_key}' обновлена.")
+    await update.message.reply_text(f"✅ Настройка '{setting_key}' обновлена.")
     
     context.user_data.clear()
     return ConversationHandler.END
 
-# --- Main Logic ---
-
-# (All other functions like search_web, should_use_thinking_mode, process_document, etc.
-# would be here. They don't need to be user-aware as they receive settings as arguments)
-
-# --- Helper to extract assistant text ---
-def extract_text_from_response(resp_json: dict) -> str:
-    # This function remains the same
-    try:
-        if "output" in resp_json:
-            out = resp_json["output"]
-            if isinstance(out, list) and len(out) > 0:
-                first = out[0]
-                if "content" in first and isinstance(first["content"], list):
-                    for item in first["content"]:
-                        if item.get("type") in ("output_text", "message"):
-                            return item.get("text") or item.get("content") or str(item)
-                    return "\n".join(
-                        [c.get("text", str(c)) for c in first.get("content", [])]
-                    )
-    except Exception:
-        pass
-
-    try:
-        if (
-            "choices" in resp_json
-            and isinstance(resp_json["choices"], list)
-            and len(resp_json["choices"]) > 0
-        ):
-            ch = resp_json["choices"][0]
-            if "message" in ch and "content" in ch["message"]:
-                if isinstance(ch["message"]["content"], dict):
-                    return ch["message"]["content"].get(
-                        "text", json.dumps(ch["message"]["content"])
-                    )
-                return ch["message"]["content"]
-            if "text" in ch:
-                return ch["text"]
-    except Exception:
-        pass
-
-    return json.dumps(resp_json)[:2000]
-
-# --- Web search function ---
-def search_web(query: str, num_results: int = 5) -> List[Dict[str, str]]:
-    """Search web using DuckDuckGo API"""
-    try:
-        url = "https://api.duckduckgo.com/"
-        params = {
-            'q': query,
-            'format': 'json',
-            'no_redirect': '1',
-            'no_html': '1',
-            'skip_disambig': '1'
-        }
-        
-        response = requests.get(url, params=params, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            results = []
-            
-            if data.get('AbstractText'):
-                results.append({
-                    'title': data.get('AbstractText', '')[:100],
-                    'snippet': data.get('AbstractText', ''),
-                    'url': data.get('AbstractURL', '')
-                })
-            
-            for topic in data.get('RelatedTopics', [])[:num_results]:
-                if isinstance(topic, dict) and 'Text' in topic:
-                    results.append({
-                        'title': topic.get('Text', '')[:50],
-                        'snippet': topic.get('Text', ''),
-                        'url': topic.get('FirstURL', '')
-                    })
-            
-            return results[:num_results]
-    except Exception as e:
-        logger.error(f"Web search error: {e}")
-    
-    return []
-
-def should_use_thinking_mode(user_message: str, api_key: str, router_endpoint: str, router_model: str) -> bool:
-    """Use router model to determine if thinking mode is needed"""
-    try:
-        prompt = f'''Analyze this user message and determine if it requires deep reasoning, complex problem-solving, or step-by-step thinking.
-
-User message: "{user_message}"
-
-Respond with ONLY "YES" if thinking mode is needed for:
-- Complex math problems
-- Multi-step reasoning
-- Coding challenges
-- Analysis requiring careful consideration
-- Problems that benefit from showing work
-
-Respond with ONLY "NO" for:
-- Simple questions
-- Casual conversation
-- Basic information requests
-- Straightforward tasks
-
-Response:'''
-
-        payload = {
-            "model": router_model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 10
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        response = requests.post(router_endpoint, headers=headers, json=payload, timeout=15)
-        if response.status_code == 200:
-            result = response.json()
-            text = extract_text_from_response(result).strip().upper()
-            return "YES" in text
-    except Exception as e:
-        logger.error(f"Router model error: {e}")
-    
-    return False
-
-def should_search_web(user_message: str) -> bool:
-    """Simple heuristic to determine if web search is needed"""
-    search_indicators = [
-        "latest", "recent", "current", "today", "news", "weather",
-        "what's happening", "update", "2024", "2025", "now",
-        "search", "find", "look up"
-    ]
-    
-    message_lower = user_message.lower()
-    return any(indicator in message_lower for indicator in search_indicators)
-
-
-# --- File processing functions ---
-def process_document(file_path: Path, file_type: str) -> str:
-    """Process uploaded documents and extract text content"""
-    try:
-        if file_type.lower() == 'pdf':
-            with open(file_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                text = ""
-                for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
-                return text.strip()
-        
-        elif file_type.lower() == 'txt':
-            return file_path.read_text(encoding='utf-8')
-        
-        elif file_type.lower() in ['jpg', 'jpeg', 'png', 'webp']:
-            return f"[IMAGE: {file_path.name}]"
-    
-    except Exception as e:
-        logger.error(f"Error processing file {file_path}: {e}")
-        return f"[Error processing file: {e}]"
-    
-    return "[Unsupported file type]"
 
 # --- Message Handlers (Multi-User Aware) ---
 
-def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Main handler for text, documents, and photos."""
     chat_id = update.effective_chat.id
     user_settings = get_user_settings(chat_id)
 
     if not user_settings or not user_settings.get("api_key"):
-        update.message.reply_text("Пожалуйста, сначала настройте свой аккаунт с помощью /start.")
+        await update.message.reply_text("Пожалуйста, сначала настройте свой аккаунт с помощью /start.")
         return
 
     user_text = update.message.text
@@ -659,12 +499,12 @@ def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # File handling logic
     if update.message.document:
-        handle_document(update, context, user_settings)
+        await handle_document(update, context, user_settings)
         # If there is no caption, we don't want to trigger the LLM
         if not user_text:
             return
     if update.message.photo:
-        handle_photo(update, context, user_settings)
+        await handle_photo(update, context, user_settings)
         if not user_text:
             return
 
@@ -672,7 +512,7 @@ def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- Main LLM call logic ---
-    status_message = update.message.reply_text("🤔 Анализирую запрос...")
+    status_message = await update.message.reply_text("🤔 Анализирую запрос...")
     
     # Use user-specific settings
     api_key = user_settings["api_key"]
@@ -688,17 +528,17 @@ def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Web search
     search_results = []
     if search_enabled and should_search_web(user_text):
-        status_message.edit_text("🔍 Ищу информацию в интернете...")
+        await status_message.edit_text("🔍 Ищу информацию в интернете...")
         search_results = search_web(user_text)
 
     # Thinking mode
     use_thinking = False
     if auto_thinking and reasoning_model:
-        use_thinking = should_use_thinking_mode(user_text, api_key, endpoint, router_model)
+        use_thinking = await asyncio.to_thread(should_use_thinking_mode, user_text, api_key, endpoint, router_model)
     
     mode_text = "🧠 Thinking режим" if use_thinking else "💬 Обычный режим"
     search_text = " + 🔍 поиск" if search_results else ""
-    status_message.edit_text(f"{mode_text}{search_text} - обрабатываю...")
+    await status_message.edit_text(f"{mode_text}{search_text} - обрабатываю...")
 
     # Prepare context
     messages = []
@@ -736,25 +576,25 @@ def main_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         timeout = 180 if use_thinking else 60
-        response = requests.post(endpoint, headers=headers, json=payload, timeout=timeout)
+        response = await asyncio.to_thread(requests.post, endpoint, headers=headers, json=payload, timeout=timeout)
         response.raise_for_status()
         
         resp_json = response.json()
         assistant_text = extract_text_from_response(resp_json)
         add_message(chat_id, "assistant", assistant_text)
         
-        status_message.delete()
-        update.message.reply_text(assistant_text)
+        await status_message.delete()
+        await update.message.reply_text(assistant_text)
 
     except requests.exceptions.RequestException as e:
         logger.error(f"API request error for chat_id {chat_id}: {e}")
-        status_message.edit_text(f"❌ Ошибка сети при обращении к API: {e}")
+        await status_message.edit_text(f"❌ Ошибка сети при обращении к API: {e}")
     except Exception as e:
         logger.error(f"Error during message handling for chat_id {chat_id}: {e}")
-        status_message.edit_text(f"❌ Произошла внутренняя ошибка: {e}")
+        await status_message.edit_text(f"❌ Произошла внутренняя ошибка: {e}")
 
 
-def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_settings: Dict[str, Any]):
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_settings: Dict[str, Any]):
     """Handle uploaded documents for a specific user."""
     document = update.message.document
     chat_id = update.effective_chat.id
@@ -763,53 +603,54 @@ def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE, user_set
     
     # Check file contexts limit
     if len(get_file_contexts(chat_id)) >= 5: # Hardcoded limit for now
-        update.message.reply_text("📂 Достигнут лимит файлов в контексте (5). Используйте /context для управления.")
+        await update.message.reply_text("📂 Достигнут лимит файлов в контексте (5). Используйте /context для управления.")
         return
     
-    update.message.reply_text("📥 Обрабатываю файл...")
+    await update.message.reply_text("📥 Обрабатываю файл...")
     
     try:
-        file = context.bot.get_file(document.file_id)
+        file = await context.bot.get_file(document.file_id)
         file_path = UPLOADS_DIR / f"{chat_id}_{int(time.time())}_{document.file_name}"
-        file.download_to_drive(file_path)
+        await file.download_to_drive(file_path)
         
-        content = process_document(file_path, file_extension)
+        content = await process_document(file_path, file_extension)
         add_file_context(chat_id, document.file_name, file_extension, content, str(file_path))
         
-        update.message.reply_text(f"✅ Файл '{document.file_name}' добавлен в контекст!")
+        await update.message.reply_text(f"✅ Файл '{document.file_name}' добавлен в контекст!")
         
     except Exception as e:
         logger.error(f"Error processing document for chat_id {chat_id}: {e}")
-        update.message.reply_text(f"❌ Ошибка обработки файла: {e}")
-def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, user_settings: Dict[str, Any]):
+        await update.message.reply_text(f"❌ Ошибка обработки файла: {e}")
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE, user_settings: Dict[str, Any]):
     """Handle uploaded photos for a specific user."""
     photo = update.message.photo[-1]
     chat_id = update.effective_chat.id
     
-    update.message.reply_text("🖼 Обрабатываю изображение...")
+    await update.message.reply_text("🖼 Обрабатываю изображение...")
     
     try:
-        file = context.bot.get_file(photo.file_id)
+        file = await context.bot.get_file(photo.file_id)
         file_path = UPLOADS_DIR / f"{chat_id}_{int(time.time())}_image.jpg"
-        file.download_to_drive(file_path)
+        await file.download_to_drive(file_path)
         
         content = f"[IMAGE: {file_path.name} - Vision API not implemented]"
         add_file_context(chat_id, file_path.name, "jpg", content, str(file_path))
         
-        update.message.reply_text("✅ Изображение добавлено в контекст!")
+        await update.message.reply_text("✅ Изображение добавлено в контекст!")
         
     except Exception as e:
         logger.error(f"Error processing photo for chat_id {chat_id}: {e}")
-        update.message.reply_text(f"❌ Ошибка обработки изображения: {e}")
+        await update.message.reply_text(f"❌ Ошибка обработки изображения: {e}")
 
 # --- Context management commands ---
-def context_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def context_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show context management options"""
     chat_id = update.effective_chat.id
     file_contexts = get_file_contexts(chat_id)
     
     if not file_contexts:
-        update.message.reply_text("📂 Контекст пуст. Загрузите файлы для добавления в контекст.")
+        await update.message.reply_text("📂 Контекст пуст. Загрузите файлы для добавления в контекст.")
         return
     
     context_info = "📂 Текущий контекст файлов:\n\n"
@@ -817,21 +658,21 @@ def context_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context_info += f"{i}. 📄 {fc['filename']} ({fc['file_type']})\n"
     
     keyboard = [[InlineKeyboardButton("🗑 Очистить контекст", callback_data="clear_context")]]
-    update.message.reply_text(context_info, reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(context_info, reply_markup=InlineKeyboardMarkup(keyboard))
 
-def context_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def context_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle context management callbacks"""
     query = update.callback_query
-    query.answer()
+    await query.answer()
     
     if query.data == "clear_context":
         chat_id = update.effective_chat.id
         clear_file_contexts(chat_id)
-        query.edit_message_text("✅ Контекст файлов очищен!")
+        await query.edit_message_text("✅ Контекст файлов очищен!")
 
 # --- Help Command ---
-def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    update.message.reply_text(
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
         "🤖 **Команды бота**\n\n"
         "/start - Начало работы и регистрация\n"
         "/settings - Настройка вашего аккаунта\n"
