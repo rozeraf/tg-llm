@@ -1,22 +1,109 @@
-# Git and virtual environment
+# Git
 .git
-.venv
+.gitignore
+.github
 
-# Python cache
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# Documentation
+README.md
+docs/
+*.md
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+venv/
+env/
+.venv/
 
-# Secrets and local config
-.env
-config.json
+# Development files
+.env.example
+.env.local
+.env.development
+tests/
+scripts/development/
 
-# Obsolete database file
-history.db
-
-# Uploads directory (created at runtime)
-uploads/
-
-# IDE and OS files
-.idea/
+# IDE and editors
 .vscode/
+.idea/
 *.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+.log
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Backup and data files
+backups/
+uploads/
+postgres-data/
+redis-data/
+prometheus-data/
+grafana-data/
+
+# Monitoring and metrics
+monitoring/
+grafana/
+prometheus/
+
+# Security
+.master_key
+*.pem
+*.key
+*.crt
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Archive files
+*.zip
+*.tar.gz
+*.tgz
+*.rar
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Node.js (if any frontend is added)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Configuration overrides
+local_settings.py
+settings_local.py
+config_local.py
